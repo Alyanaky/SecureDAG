@@ -4,17 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log"
-
-	"github.com/libp2p/go-libp2p"
+	"os"
+	
+	"github.com/Alyanaky/SecureDAG/internal/p2p"
 	"github.com/libp2p/go-libp2p/core/network"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
 	ctx := context.Background()
-	node, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"))
+	
+	kadDHT, node, err := p2p.NewDHT(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer kadDHT.Close()
 
 	fmt.Printf("Node ID: %s\n", node.ID())
 	fmt.Printf("Addresses:\n")
@@ -30,5 +34,19 @@ func main() {
 		s.Write([]byte("ACK: " + string(buf[:n])))
 	})
 
-	<-ctx.Done()
+	if len(os.Args) > 1 {
+		peerAddr := os.Args[1]
+		addr, _ := ma.NewMultiaddr(peerAddr)
+		peerInfo, _ := peer.AddrInfoFromP2pAddr(addr)
+		
+		if err := node.Connect(ctx, *peerInfo); err != nil {
+			log.Fatal(err)
+		}
+		
+		s, _ := node.NewStream(ctx, peerInfo.ID, "/secure-dag/1.0")
+		s.Write([]byte("Hello from node 2"))
+		defer s.Close()
+	}
+
+	select {}
 }
