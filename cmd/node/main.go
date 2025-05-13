@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	
+	"strings"
+	"time"
+
 	"github.com/Alyanaky/SecureDAG/internal/p2p"
+	"github.com/Alyanaky/SecureDAG/internal/storage"
 	"github.com/libp2p/go-libp2p/core/network"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -20,32 +23,39 @@ func main() {
 	}
 	defer kadDHT.Close()
 
-	fmt.Printf("Node ID: %s\n", node.ID())
-	fmt.Printf("Addresses:\n")
-	for _, addr := range node.Addrs() {
-		fmt.Printf("  %s/p2p/%s\n", addr, node.ID())
-	}
+	storage := storage.NewStorage()
 
 	node.SetStreamHandler("/secure-dag/1.0", func(s network.Stream) {
 		defer s.Close()
 		buf := make([]byte, 1024)
 		n, _ := s.Read(buf)
-		fmt.Printf("Received: %s\n", string(buf[:n]))
-		s.Write([]byte("ACK: " + string(buf[:n])))
+		msg := string(buf[:n])
+		
+		if strings.HasPrefix(msg, "STORE:") {
+			hash := strings.TrimPrefix(msg, "STORE:")
+			if data, exists := storage.GetBlock(hash); exists {
+				p2p.PutToDHT(ctx, kadDHT, hash, data)
+			}
+		}
 	})
 
-	if len(os.Args) > 1 {
-		peerAddr := os.Args[1]
-		addr, _ := ma.NewMultiaddr(peerAddr)
-		peerInfo, _ := peer.AddrInfoFromP2pAddr(addr)
+	if len(os.Args) > 1 && os.Args[1] == "put" {
+		content := []byte("Hello SecureDAG!")
+		hashes, _ := storage.SplitAndStore(bytes.NewReader(content), 256)
+		fmt.Printf("Stored hashes: %v\n", hashes)
 		
-		if err := node.Connect(ctx, *peerInfo); err != nil {
-			log.Fatal(err)
+		for _, hash := range hashes {
+			if data, exists := storage.GetBlock(hash); exists {
+				p2p.PutToDHT(ctx, kadDHT, hash, data)
+				fmt.Printf("Published hash %s to DHT\n", hash)
+			}
 		}
-		
-		s, _ := node.NewStream(ctx, peerInfo.ID, "/secure-dag/1.0")
-		s.Write([]byte("Hello from node 2"))
-		defer s.Close()
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "get" {
+		hash := os.Args[2]
+		data, _ := p2p.GetFromDHT(ctx, kadDHT, hash)
+		fmt.Printf("Retrieved data: %s\n", string(data))
 	}
 
 	select {}
