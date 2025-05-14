@@ -1,90 +1,100 @@
-package storage
-
-import (
-	"bytes"
-	"crypto/sha256"
-	"fmt"
-	"io"
-	"time"
-
-	"github.com/dgraph-io/badger/v4"
-)
-
+// Добавить в структуру
 type BadgerStore struct {
-	db *badger.DB
+	db        *badger.DB
+	publicKey  *rsa.PublicKey
+	privateKey *rsa.PrivateKey
 }
 
+// Обновить конструктор
 func NewBadgerStore(path string) (*BadgerStore, error) {
-	opts := badger.DefaultOptions(path)
-	opts.Logger = nil // Отключаем логгер для чистоты вывода
+	// ... существующий код ...
 	
-	db, err := badger.Open(opts)
+	// Генерируем ключи при инициализации
+	privKey, pubKey, err := crypto.GenerateRSAKeys()
 	if err != nil {
 		return nil, err
 	}
 	
-	return &BadgerStore{db: db}, nil
+	return &BadgerStore{
+		db:         db,
+		publicKey:  pubKey,
+		privateKey: privKey,
+	}, nil
 }
 
-func (s *BadgerStore) Close() error {
-	return s.db.Close()
-}
-
+// Обновить методы работы с данными
 func (s *BadgerStore) PutBlock(data []byte) (string, error) {
-	hash := sha256.Sum256(data)
+	// Генерируем случайный AES-ключ для каждого блока
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		return "", err
+	}
+
+	// Шифруем данные
+	encryptedData, err := crypto.EncryptData(data, aesKey)
+	if err != nil {
+		return "", err
+	}
+
+	// Шифруем AES-ключ
+	encryptedKey, err := crypto.EncryptAESKey(s.publicKey, aesKey)
+	if err != nil {
+		return "", err
+	}
+
+	// Сохраняем в BadgerDB
+	hash := sha256.Sum256(encryptedData)
 	key := fmt.Sprintf("%x", hash)
 	
-	err := s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(key), data)
+	err = s.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte(key), encryptedData); err != nil {
+			return err
+		}
+		return txn.Set([]byte("key_"+key), encryptedKey)
 	})
 	
 	return key, err
 }
 
 func (s *BadgerStore) GetBlock(hash string) ([]byte, error) {
-	var valCopy []byte
+	var encryptedData, encryptedKey []byte
+	
+	// Получаем зашифрованные данные
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(hash))
 		if err != nil {
 			return err
 		}
-		
 		return item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
+			encryptedData = append([]byte{}, val...)
 			return nil
 		})
 	})
-	
-	return valCopy, err
-}
-
-func (s *BadgerStore) SplitAndStore(r io.Reader, chunkSize int) ([]string, error) {
-	var hashes []string
-	buf := make([]byte, chunkSize)
-	
-	for {
-		n, err := r.Read(buf)
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		if n == 0 {
-			break
-		}
-
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n])
-		
-		hash, err := s.PutBlock(chunk)
-		if err != nil {
-			return nil, err
-		}
-		
-		hashes = append(hashes, hash)
-		
-		if err == io.EOF {
-			break
-		}
+	if err != nil {
+		return nil, err
 	}
-	
-	return hashes, nil
+
+	// Получаем зашифрованный ключ
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("key_"+hash))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			encryptedKey = append([]byte{}, val...)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Расшифровываем AES-ключ
+	aesKey, err := crypto.DecryptAESKey(s.privateKey, encryptedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Расшифровываем данные
+	return crypto.DecryptData(encryptedData, aesKey)
 }
