@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,45 +19,60 @@ import (
 func main() {
 	ctx := context.Background()
 	
+	// Инициализация хранилища
+	storePath := filepath.Join(".", "storage", fmt.Sprintf("node-%d", time.Now().UnixNano()))
+	storage, err := storage.NewBadgerStore(storePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer storage.Close()
+
+	// Инициализация P2P
 	kadDHT, node, err := p2p.NewDHT(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer kadDHT.Close()
 
-	storage := storage.NewStorage()
-
+	// Обработчик входящих соединений
 	node.SetStreamHandler("/secure-dag/1.0", func(s network.Stream) {
 		defer s.Close()
 		buf := make([]byte, 1024)
 		n, _ := s.Read(buf)
 		msg := string(buf[:n])
 		
-		if strings.HasPrefix(msg, "STORE:") {
-			hash := strings.TrimPrefix(msg, "STORE:")
-			if data, exists := storage.GetBlock(hash); exists {
-				p2p.PutToDHT(ctx, kadDHT, hash, data)
+		if strings.HasPrefix(msg, "GET:") {
+			hash := strings.TrimPrefix(msg, "GET:")
+			data, err := storage.GetBlock(hash)
+			if err == nil {
+				s.Write(data)
 			}
 		}
 	})
 
-	if len(os.Args) > 1 && os.Args[1] == "put" {
-		content := []byte("Hello SecureDAG!")
-		hashes, _ := storage.SplitAndStore(bytes.NewReader(content), 256)
-		fmt.Printf("Stored hashes: %v\n", hashes)
-		
-		for _, hash := range hashes {
-			if data, exists := storage.GetBlock(hash); exists {
-				p2p.PutToDHT(ctx, kadDHT, hash, data)
-				fmt.Printf("Published hash %s to DHT\n", hash)
+	// CLI команды
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "put":
+			content := []byte("Persistent SecureDAG data!")
+			hashes, _ := storage.SplitAndStore(bytes.NewReader(content), 256)
+			fmt.Printf("Stored hashes: %v\n", hashes)
+			
+			for _, hash := range hashes {
+				if data, err := storage.GetBlock(hash); err == nil {
+					p2p.PutToDHT(ctx, kadDHT, hash, data)
+					fmt.Printf("Published hash %s to DHT\n", hash)
+				}
 			}
+			
+		case "get":
+			if len(os.Args) < 3 {
+				log.Fatal("Usage: get <hash>")
+			}
+			hash := os.Args[2]
+			data, _ := p2p.GetFromDHT(ctx, kadDHT, hash)
+			fmt.Printf("Retrieved data: %s\n", string(data))
 		}
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "get" {
-		hash := os.Args[2]
-		data, _ := p2p.GetFromDHT(ctx, kadDHT, hash)
-		fmt.Printf("Retrieved data: %s\n", string(data))
 	}
 
 	select {}
