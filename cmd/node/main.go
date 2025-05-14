@@ -60,7 +60,7 @@ func main() {
 			
 			for _, hash := range hashes {
 				if data, err := storage.GetBlock(hash); err == nil {
-					p2p.PutToDHT(ctx, kadDHT, hash, data)
+					p2p.ReplicateBlock(ctx, kadDHT, hash, data, 3)
 					fmt.Printf("Published hash %s to DHT\n", hash)
 				}
 			}
