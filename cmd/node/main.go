@@ -15,6 +15,7 @@ import (
 	"github.com/Alyanaky/SecureDAG/internal/storage"
 	"github.com/Alyanaky/SecureDAG/internal/sync"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/Alyanaky/SecureDAG/internal/storage"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
