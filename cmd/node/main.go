@@ -37,6 +37,9 @@ func main() {
 	gossip := sync.NewGossipManager(node)
 	go gossip.Start(ctx)
 
+	replicator := storage.NewReplicator(store, kadDHT, 5*time.Minute)
+	go replicator.Start(ctx)
+
 	node.SetStreamHandler("/secure-dag/1.0", func(s network.Stream) {
 		defer s.Close()
 		buf := make([]byte, 1024)
