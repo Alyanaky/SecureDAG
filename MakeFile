@@ -1,9 +1,15 @@
-.PHONY: gen-swagger run-api
+.PHONY: gen-swagger run-api migrate-up migrate-down
+
+DB_URL ?= postgres://user:pass@localhost:5432/secure-dag?sslmode=disable
 
 gen-swagger:
-	@echo "Generating Swagger documentation..."
 	@swag init -g cmd/api/server.go -o docs/swagger
 
 run-api:
-	@echo "Starting API server..."
 	@go run cmd/api/server.go
+
+migrate-up:
+	@go run cmd/migrate/main.go -action=up -conn=$(DB_URL)
+
+migrate-down:
+	@go run cmd/migrate/main.go -action=down -conn=$(DB_URL)
