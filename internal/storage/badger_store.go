@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/Alyanaky/SecureDAG/internal/crypto"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 )
 
 type BlockMetadata struct {
@@ -23,12 +26,15 @@ type BadgerStore struct {
 	db         *badger.DB
 	publicKey  *rsa.PublicKey
 	privateKey *rsa.PrivateKey
-	crdt       *CRDTStore
 }
 
 func NewBadgerStore(path string) (*BadgerStore, error) {
 	opts := badger.DefaultOptions(path)
 	opts.Logger = nil
+	opts.Compression = options.ZSTD
+	opts.IndexCacheSize = 256 << 20
+	opts.WithCompactL0OnClose = true
+
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
@@ -43,8 +49,11 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		db:         db,
 		publicKey:  pubKey,
 		privateKey: privKey,
-		crdt:       &CRDTStore{values: make(map[string][]CRDTValue)},
 	}, nil
+}
+
+func (s *BadgerStore) Close() error {
+	return s.db.Close()
 }
 
 func (s *BadgerStore) PutBlock(data []byte) (string, error) {
@@ -97,4 +106,43 @@ func (s *BadgerStore) updateMetadata(hash string, delta int) error {
 		metaBytes, _ := json.Marshal(meta)
 		return txn.Set([]byte(metaKey), metaBytes)
 	})
+}
+
+func (s *BadgerStore) GetBlock(hash string) ([]byte, error) {
+	var encryptedData, encryptedKey []byte
+	
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(hash))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			encryptedData = append([]byte{}, val...)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("key_"+hash))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			encryptedKey = append([]byte{}, val...)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	aesKey, err := crypto.DecryptAESKey(s.privateKey, encryptedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return crypto.DecryptData(encryptedData, aesKey)
 }
