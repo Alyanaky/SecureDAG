@@ -1,0 +1,9 @@
+.PHONY: gen-swagger run-api
+
+gen-swagger:
+	@echo "Generating Swagger documentation..."
+	@swag init -g cmd/api/server.go -o docs/swagger
+
+run-api:
+	@echo "Starting API server..."
+	@go run cmd/api/server.go
