@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Alyanaky/SecureDAG/internal/auth"
 	"github.com/Alyanaky/SecureDAG/internal/metrics"
+	"github.com/Alyanaky/SecureDAG/internal/p2p"
 	"github.com/Alyanaky/SecureDAG/internal/storage"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
@@ -17,42 +19,82 @@ import (
 var (
 	quotaManager *storage.QuotaManager
 	pgStore      *storage.PostgresStore
+	nodeManager  *p2p.NodeManager
 )
 
 func main() {
 	metrics.Init()
+	
+	// Инициализация PostgreSQL
 	connStr := os.Getenv("POSTGRES_URL")
-	store, _ := storage.NewPostgresStore(connStr)
-	store.Migrate()
-	quotaManager = storage.NewQuotaManager()
+	pgStore = initPostgres(connStr)
+	
+	// Инициализация P2P
+	nodeManager = p2p.NewNodeManager()
+	go nodeManager.Start()
+	
+	// Запуск API
 	StartAPIServer(storage.NewBadgerStore("data"))
+}
+
+func initPostgres(connStr string) *storage.PostgresStore {
+	store, err := storage.NewPostgresStore(connStr)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect to PostgreSQL: %v", err))
+	}
+	if err := store.Migrate(); err != nil {
+		panic(fmt.Sprintf("Migration failed: %v", err))
+	}
+	return store
 }
 
 func StartAPIServer(store *storage.BadgerStore) {
 	r := gin.Default()
-	r.GET("/metrics", gin.WrapH(metrics.Handler()))
-	r.POST("/login", loginHandler)
 	
+	// Метрики
+	r.GET("/metrics", gin.WrapH(metrics.Handler()))
+	
+	// Аутентификация
+	r.POST("/login", loginHandler(store))
+	
+	// Авторизованные эндпоинты
 	authGroup := r.Group("/")
 	authGroup.Use(authMiddleware(store))
-	authGroup.PUT("/objects/:key", putObjectHandler(store))
-	authGroup.GET("/objects/:hash", getObjectHandler(store))
-	
-	adminGroup := authGroup.Group("/admin")
-	adminGroup.GET("/users", adminGetUsersHandler)
-
-	port := os.Getenv("API_PORT")
-	if port == "" {
-		port = "8080"
+	{
+		authGroup.PUT("/objects/:key", putObjectHandler(store))
+		authGroup.GET("/objects/:hash", getObjectHandler(store))
 	}
+	
+	// Админские эндпоинты
+	adminGroup := authGroup.Group("/admin")
+	adminGroup.Use(adminAuthMiddleware()))
+	{
+		adminGroup.GET("/nodes", listNodesHandler)
+		adminGroup.POST("/nodes/restart", restartNodeHandler)
+		adminGroup.GET("/stats", systemStatsHandler)
+	}
+
+	port := getPort()
 	r.Run(":" + port)
 }
 
-func loginHandler(c *gin.Context) {
-	var creds struct{ Username, Password string }
-	c.BindJSON(&creds)
-	token, _ := auth.GenerateToken(creds.Username, storage.GetPrivateKey())
-	c.JSON(http.StatusOK, gin.H{"token": token})
+// Обработчики
+func loginHandler(store *storage.BadgerStore) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var creds struct{ Username, Password string }
+		if err := c.BindJSON(&creds); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		
+		token, err := auth.GenerateToken(creds.Username, store.PrivateKey())
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
+			return
+		}
+		
+		c.JSON(http.StatusOK, gin.H{"token": token})
+	}
 }
 
 func authMiddleware(store *storage.BadgerStore) gin.HandlerFunc {
@@ -60,65 +102,157 @@ func authMiddleware(store *storage.BadgerStore) gin.HandlerFunc {
 		token := c.GetHeader("Authorization")
 		claims, err := auth.ValidateToken(token, store.PublicKey())
 		if err != nil {
-			c.AbortWithStatus(http.StatusUnauthorized)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
-		role := getRoleFromDB(claims.UserID)
-		if !auth.HasPermission(auth.Role(role), c.FullPath(), c.Request.Method) {
-			c.AbortWithStatus(http.StatusForbidden)
-		}
-		c.Set("claims", claims)
-		c.Set("role", role)
+		
+		c.Set("user_id", claims.UserID)
+		c.Next()
 	}
 }
 
-func putObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
+func adminAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		start := time.Now()
-		defer func() {
-			metrics.RequestsTotal.WithLabelValues(
-				c.Request.Method,
-				c.FullPath(),
-				strconv.Itoa(c.Writer.Status()),
-			).Inc()
+		userID := c.MustGet("user_id").(string)
+		if !isAdmin(userID) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "access denied"})
+			return
+		}
+		c.Next()
+	}
+}
+
+// Реализация P2P функций в internal/p2p/network.go
+package p2p
+
+import (
+	"context"
+	"sync"
+	
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p-kad-dht"
+)
+
+type NodeManager struct {
+	host  host.Host
+	dht   *dht.IpfsDHT
+	nodes map[string]*Node
+	mu    sync.RWMutex
+}
+
+type Node struct {
+	ID      string
+	Address string
+	Status  string
+}
+
+func NewNodeManager() *NodeManager {
+	return &NodeManager{
+		nodes: make(map[string]*Node),
+	}
+}
+
+func (m *NodeManager) Start() {
+	ctx := context.Background()
+	var err error
+	
+	m.host, err = libp2p.New()
+	if err != nil {
+		panic(err)
+	}
+	
+	m.dht, err = dht.New(ctx, m.host)
+	if err != nil {
+		panic(err)
+	}
+	
+	go m.discoverNodes(ctx)
+}
+
+func (m *NodeManager) discoverNodes(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			peers := m.dht.RoutingTable().ListPeers()
+			m.mu.Lock()
+			for _, pid := range peers {
+				id := pid.String()
+				if _, exists := m.nodes[id]; !exists {
+					m.nodes[id] = &Node{
+						ID:      id,
+						Address: fmt.Sprintf("%s/p2p/%s", m.host.Addrs()[0], id),
+						Status:  "active",
+					}
+				}
+			}
+			m.mu.Unlock()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (m *NodeManager) GetNodes() []Node {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	nodes := make([]Node, 0, len(m.nodes))
+	for _, n := range m.nodes {
+		nodes = append(nodes, *n)
+	}
+	return nodes
+}
+
+func (m *NodeManager) RestartNode(nodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	if node, exists := m.nodes[nodeID]; exists {
+		node.Status = "restarting"
+		go func() {
+			time.Sleep(5 * time.Second) // Имитация перезапуска
+			node.Status = "active"
 		}()
-		claims := c.MustGet("claims").(*auth.Claims)
-		data, _ := c.GetRawData()
-		if !quotaManager.CheckQuota(claims.UserID, int64(len(data))) {
-			c.AbortWithStatus(http.StatusTooManyRequests)
-			return
-		}
-		hash, _ := store.PutBlock(data)
-		quotaManager.UpdateUsage(claims.UserID, int64(len(data)))
-		c.JSON(http.StatusOK, gin.H{"hash": hash})
+		return nil
 	}
+	return fmt.Errorf("node %s not found", nodeID)
 }
 
-func getObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		data, err := store.GetBlock(c.Param("hash"))
-		if err != nil {
-			c.AbortWithStatus(http.StatusNotFound)
-			return
-		}
-		c.Data(http.StatusOK, "application/octet-stream", data)
+// Вспомогательные функции
+func getPort() string {
+	if port := os.Getenv("API_PORT"); port != "" {
+		return port
 	}
+	return "8080"
 }
 
-func adminGetUsersHandler(c *gin.Context) {
-	rows, _ := pgStore.db.Query("SELECT id, role FROM users")
-	defer rows.Close()
-	var users []map[string]interface{}
-	for rows.Next() {
-		var id, role string
-		rows.Scan(&id, &role)
-		users = append(users, map[string]interface{}{"id": id, "role": role})
-	}
-	c.JSON(http.StatusOK, users)
-}
-
-func getRoleFromDB(userID string) string {
+func isAdmin(userID string) bool {
 	var role string
-	pgStore.db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&role)
-	return role
+	err := pgStore.db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&role)
+	return err == nil && role == "admin"
+}
+
+func listNodesHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"nodes": nodeManager.GetNodes()})
+}
+
+func restartNodeHandler(c *gin.Context) {
+	nodeID := c.Query("id")
+	if err := nodeManager.RestartNode(nodeID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func systemStatsHandler(c *gin.Context) {
+	stats := gin.H{
+		"nodes":    len(nodeManager.GetNodes()),
+		"storage":  storage.GetUsageStats(),
+		"requests": metrics.GetRequestStats(),
+	}
+	c.JSON(http.StatusOK, stats)
 }
