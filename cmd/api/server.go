@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/Alyanaky/SecureDAG/internal/auth"
+	"github.com/Alyanaky/SecureDAG/internal/metrics"
 	"github.com/Alyanaky/SecureDAG/internal/storage"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
@@ -17,22 +20,21 @@ var (
 )
 
 func main() {
+	metrics.Init()
 	connStr := os.Getenv("POSTGRES_URL")
 	store, _ := storage.NewPostgresStore(connStr)
 	store.Migrate()
-	
 	quotaManager = storage.NewQuotaManager()
 	StartAPIServer(storage.NewBadgerStore("data"))
 }
 
 func StartAPIServer(store *storage.BadgerStore) {
 	r := gin.Default()
-
+	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 	r.POST("/login", loginHandler)
 	
 	authGroup := r.Group("/")
 	authGroup.Use(authMiddleware(store))
-	
 	authGroup.PUT("/objects/:key", putObjectHandler(store))
 	authGroup.GET("/objects/:hash", getObjectHandler(store))
 	
@@ -49,7 +51,6 @@ func StartAPIServer(store *storage.BadgerStore) {
 func loginHandler(c *gin.Context) {
 	var creds struct{ Username, Password string }
 	c.BindJSON(&creds)
-	
 	token, _ := auth.GenerateToken(creds.Username, storage.GetPrivateKey())
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }
@@ -62,12 +63,10 @@ func authMiddleware(store *storage.BadgerStore) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-		
 		role := getRoleFromDB(claims.UserID)
 		if !auth.HasPermission(auth.Role(role), c.FullPath(), c.Request.Method) {
 			c.AbortWithStatus(http.StatusForbidden)
 		}
-		
 		c.Set("claims", claims)
 		c.Set("role", role)
 	}
@@ -75,14 +74,20 @@ func authMiddleware(store *storage.BadgerStore) gin.HandlerFunc {
 
 func putObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		start := time.Now()
+		defer func() {
+			metrics.RequestsTotal.WithLabelValues(
+				c.Request.Method,
+				c.FullPath(),
+				strconv.Itoa(c.Writer.Status()),
+			).Inc()
+		}()
 		claims := c.MustGet("claims").(*auth.Claims)
 		data, _ := c.GetRawData()
-		
 		if !quotaManager.CheckQuota(claims.UserID, int64(len(data))) {
 			c.AbortWithStatus(http.StatusTooManyRequests)
 			return
 		}
-		
 		hash, _ := store.PutBlock(data)
 		quotaManager.UpdateUsage(claims.UserID, int64(len(data)))
 		c.JSON(http.StatusOK, gin.H{"hash": hash})
@@ -103,7 +108,6 @@ func getObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
 func adminGetUsersHandler(c *gin.Context) {
 	rows, _ := pgStore.db.Query("SELECT id, role FROM users")
 	defer rows.Close()
-	
 	var users []map[string]interface{}
 	for rows.Next() {
 		var id, role string
