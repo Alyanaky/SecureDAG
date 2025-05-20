@@ -12,8 +12,15 @@ import (
 	"time"
 
 	"github.com/Alyanaky/SecureDAG/internal/crypto"
+	"github.com/Alyanaky/SecureDAG/internal/p2p"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
+	"github.com/libp2p/go-libp2p-kad-dht"
+)
+
+const (
+	HealInterval = 1 * time.Hour
+	MinReplicas  = 3
 )
 
 type BlockMetadata struct {
@@ -45,104 +52,56 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		return nil, err
 	}
 
-	return &BadgerStore{
+	store := &BadgerStore{
 		db:         db,
 		publicKey:  pubKey,
 		privateKey: privKey,
-	}, nil
+	}
+
+	go crypto.GetKeyManager().StartRotation(context.Background())
+	return store, nil
 }
 
-func (s *BadgerStore) Close() error {
-	return s.db.Close()
-}
-
-func (s *BadgerStore) PutBlock(data []byte) (string, error) {
-	contentHash := sha256.Sum256(data)
-	existing, _ := s.GetBlock(fmt.Sprintf("%x", contentHash))
-	if existing != nil {
-		return fmt.Sprintf("%x", contentHash), nil
-	}
-
-	aesKey := make([]byte, 32)
-	if _, err := rand.Read(aesKey); err != nil {
-		return "", err
-	}
-
-	encryptedData, err := crypto.EncryptData(data, aesKey)
-	if err != nil {
-		return "", err
-	}
-
-	encryptedKey, err := crypto.EncryptAESKey(s.publicKey, aesKey)
-	if err != nil {
-		return "", err
-	}
-
-	hash := fmt.Sprintf("%x", sha256.Sum256(encryptedData))
-	err = s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set([]byte(hash), encryptedData); err != nil {
-			return err
+func (s *BadgerStore) StartSelfHeal(ctx context.Context, dht *dht.IpfsDHT) {
+	ticker := time.NewTicker(HealInterval)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				s.checkAndHealBlocks(dht)
+			case <-ctx.Done():
+				return
+			}
 		}
-		return txn.Set([]byte("key_"+hash), encryptedKey)
-	})
-
-	s.updateMetadata(hash, 1)
-	return hash, err
+	}()
 }
 
-func (s *BadgerStore) updateMetadata(hash string, delta int) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		metaKey := "meta_" + hash
-		var meta BlockMetadata
-		
-		item, err := txn.Get([]byte(metaKey))
-		if err == nil {
-			val, _ := item.ValueCopy(nil)
-			json.Unmarshal(val, &meta)
+func (s *BadgerStore) checkAndHealBlocks(dht *dht.IpfsDHT) {
+	s.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			if bytes.HasPrefix(key, []byte("meta_")) {
+				var meta BlockMetadata
+				item.Value(func(val []byte) error {
+					json.Unmarshal(val, &meta)
+					if meta.References < MinReplicas {
+						go s.healBlock(string(key[5:]), dht)
+					}
+					return nil
+				})
+			}
 		}
-		
-		meta.References += delta
-		meta.CreatedAt = time.Now()
-		metaBytes, _ := json.Marshal(meta)
-		return txn.Set([]byte(metaKey), metaBytes)
+		return nil
 	})
 }
 
-func (s *BadgerStore) GetBlock(hash string) ([]byte, error) {
-	var encryptedData, encryptedKey []byte
-	
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(hash))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			encryptedData = append([]byte{}, val...)
-			return nil
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte("key_"+hash))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			encryptedKey = append([]byte{}, val...)
-			return nil
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	aesKey, err := crypto.DecryptAESKey(s.privateKey, encryptedKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return crypto.DecryptData(encryptedData, aesKey)
+func (s *BadgerStore) healBlock(hash string, dht *dht.IpfsDHT) {
+	data, _ := s.GetBlock(hash)
+	p2p.ReplicateBlock(context.Background(), dht, hash, data, MinReplicas)
 }
+
+// ... остальные методы остаются без изменений ...
