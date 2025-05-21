@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,177 +19,276 @@ import (
 )
 
 var (
-	quotaManager  *storage.QuotaManager
-	pgStore       *storage.PostgresStore
-	nodeManager   *p2p.NodeManager
-	loadBalancer  *p2p.LoadBalancer
-	deleteManager *storage.DeletionManager
+	quotaManager   *storage.QuotaManager
+	pgStore        *storage.PostgresStore
+	nodeManager    *p2p.NodeManager
+	storageBackend *storage.BadgerStore
+	deleteManager  *storage.DeletionManager
 )
 
 func main() {
 	metrics.Init()
-	
-	// Инициализация PostgreSQL
-	connStr := getPostgresURL()
-	pgStore = initPostgres(connStr)
-	
-	// Инициализация P2P
-	nodeManager = p2p.NewNodeManager()
-	loadBalancer = p2p.NewLoadBalancer()
-	go nodeManager.Start()
-	
-	// Инициализация менеджеров
-	quotaManager = storage.NewQuotaManager()
-	deleteManager = storage.NewDeletionManager()
-	
-	// Запуск API
-	StartAPIServer(storage.NewBadgerStore("data"))
+	initStorage()
+	initPostgres()
+	initP2P()
+	startAPIServer()
 }
 
-func initPostgres(connStr string) *storage.PostgresStore {
-	store, err := storage.NewPostgresStore(connStr)
+func initStorage() {
+	var err error
+	storageBackend, err = storage.NewBadgerStore(getStoragePath())
+	if err != nil {
+		panic(fmt.Sprintf("Storage init failed: %v", err))
+	}
+	deleteManager = storage.NewDeletionManager()
+	quotaManager = storage.NewQuotaManager()
+}
+
+func initPostgres() {
+	connStr := getPostgresURL()
+	var err error
+	pgStore, err = storage.NewPostgresStore(connStr)
 	if err != nil {
 		panic(fmt.Sprintf("Postgres init failed: %v", err))
 	}
-	if err := store.Migrate(); err != nil {
+	if err := pgStore.Migrate(); err != nil {
 		panic(fmt.Sprintf("Migration failed: %v", err))
 	}
-	return store
 }
 
-func StartAPIServer(store *storage.BadgerStore) {
+func initP2P() {
+	nodeManager = p2p.NewNodeManager()
+	go nodeManager.Start(context.Background())
+}
+
+func startAPIServer() {
 	r := gin.Default()
-	
-	// Метрики Prometheus
-	r.GET("/metrics", gin.WrapH(metrics.Handler()))
-	
-	// Аутентификация
-	r.POST("/login", loginHandler(store))
-	
-	// Основные эндпоинты
-	api := r.Group("/v1")
-	api.Use(authMiddleware(store))
+	configureRoutes(r)
+	r.Run(":" + getPort())
+}
+
+func configureRoutes(r *gin.Engine) {
+	// Core API
+	api := r.Group("/api/v1")
 	{
-		api.PUT("/objects/:key", putObjectHandler(store))
-		api.GET("/objects/:hash", getObjectHandler(store))
-		api.DELETE("/objects/:hash", deleteObjectHandler(store))
+		api.POST("/auth", authHandler)
+		api.Use(authMiddleware())
+		api.PUT("/objects/:key", putObjectHandler)
+		api.GET("/objects/:hash", getObjectHandler)
+		api.DELETE("/objects/:hash", deleteObjectHandler)
+		api.GET("/users/:id/quota", getQuotaHandler)
+		api.PUT("/users/:id/quota", updateQuotaHandler)
 	}
-	
-	// Администрирование
-	admin := api.Group("/admin")
+
+	// S3 Compatible API
+	s3 := r.Group("/s3")
+	{
+		s3.PUT("/:bucket/*key", s3PutHandler)
+		s3.GET("/:bucket/*key", s3GetHandler)
+		s3.DELETE("/:bucket/*key", s3DeleteHandler)
+		s3.HEAD("/:bucket/*key", s3HeadHandler)
+	}
+
+	// Admin API
+	admin := r.Group("/admin")
 	admin.Use(adminAuthMiddleware())
 	{
 		admin.GET("/nodes", listNodesHandler)
 		admin.POST("/nodes/restart", restartNodeHandler)
-		admin.PUT("/users/:id/quota", updateQuotaHandler)
 		admin.GET("/stats", systemStatsHandler)
+		admin.GET("/health", healthCheckHandler)
 	}
-	
-	// Запуск сервера
-	port := getPort()
-	r.Run(":" + port)
+
+	// Metrics
+	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 }
 
-// Обработчики запросов
-func loginHandler(store *storage.BadgerStore) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var creds struct{ Username, Password string }
-		if err := c.BindJSON(&creds); err != nil {
-			sendError(c, http.StatusBadRequest, "Invalid request format")
-			return
-		}
-		
-		token, err := auth.GenerateToken(creds.Username, store.PrivateKey())
-		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Token generation failed")
-			return
-		}
-		
-		c.JSON(http.StatusOK, gin.H{"token": token})
+// ### Core API Handlers ###
+func authHandler(c *gin.Context) {
+	var creds struct{ Username, Password string }
+	if err := c.BindJSON(&creds); err != nil {
+		abortWithError(c, http.StatusBadRequest, "Invalid request format")
+		return
 	}
+
+	token, err := auth.GenerateToken(creds.Username, storageBackend.PublicKey())
+	if err != nil {
+		abortWithError(c, http.StatusInternalServerError, "Token generation failed")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": token})
 }
 
-func putObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		defer metrics.ObserveRequest(c, start)
-		
-		// Проверка квоты
-		userID := c.MustGet("user_id").(string)
-		data, _ := c.GetRawData()
-		
-		if !quotaManager.CheckQuota(userID, int64(len(data))) {
-			sendError(c, http.StatusTooManyRequests, "Quota exceeded")
-			return
-		}
-		
-		// Балансировка нагрузки
-		targetNodes := loadBalancer.SelectNodes(3)
-		if len(targetNodes) == 0 {
-			sendError(c, http.StatusServiceUnavailable, "No available nodes")
-			return
-		}
-		
-		// Сохранение данных
-		hash, err := store.PutBlock(data)
-		if err != nil {
-			sendError(c, http.StatusInternalServerError, "Storage error")
-			return
-		}
-		
-		// Репликация
-		go p2p.ReplicateToNodes(hash, data, targetNodes)
-		quotaManager.UpdateUsage(userID, int64(len(data)))
-		
-		c.JSON(http.StatusOK, gin.H{
-			"hash": hash,
-			"nodes": targetNodes,
-		})
+func putObjectHandler(c *gin.Context) {
+	userID := c.MustGet("user_id").(string)
+	data, _ := c.GetRawData()
+
+	if !quotaManager.CheckQuota(userID, int64(len(data))) {
+		abortWithError(c, http.StatusTooManyRequests, "Storage quota exceeded")
+		return
 	}
+
+	hash, err := storageBackend.PutBlock(data)
+	if err != nil {
+		abortWithError(c, http.StatusInternalServerError, "Failed to store object")
+		return
+	}
+
+	quotaManager.UpdateUsage(userID, int64(len(data)))
+	c.JSON(http.StatusOK, gin.H{"hash": hash})
 }
 
-func deleteObjectHandler(store *storage.BadgerStore) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		hash := c.Param("hash")
-		if err := deleteManager.ScheduleDeletion(hash, 5*time.Minute); err != nil {
-			sendError(c, http.StatusConflict, "Deletion already scheduled")
+func getObjectHandler(c *gin.Context) {
+	hash := c.Param("hash")
+	data, err := storageBackend.GetBlock(hash)
+	if err != nil {
+		if errors.Is(err, storage.ErrBlockNotFound) {
+			abortWithError(c, http.StatusNotFound, "Object not found")
 			return
 		}
-		c.Status(http.StatusAccepted)
+		abortWithError(c, http.StatusInternalServerError, "Failed to retrieve object")
+		return
 	}
+	c.Data(http.StatusOK, "application/octet-stream", data)
 }
 
-// Middleware
-func authMiddleware(store *storage.BadgerStore) gin.HandlerFunc {
+func deleteObjectHandler(c *gin.Context) {
+	hash := c.Param("hash")
+	if err := deleteManager.ScheduleDeletion(hash, 5*time.Minute); err != nil {
+		abortWithError(c, http.StatusConflict, "Deletion already scheduled")
+		return
+	}
+	c.Status(http.StatusAccepted)
+}
+
+// ### S3 API Handlers ###
+func s3PutHandler(c *gin.Context) {
+	bucket := c.Param("bucket")
+	key := c.Param("key")
+	data, _ := c.GetRawData()
+
+	meta := map[string]string{
+		"Content-Type": c.GetHeader("Content-Type"),
+		"Bucket":       bucket,
+		"Key":          key,
+	}
+
+	hash, err := storageBackend.PutBlockWithMetadata(data, meta)
+	if err != nil {
+		abortWithError(c, http.StatusInternalServerError, "Failed to store object")
+		return
+	}
+
+	c.Header("ETag", fmt.Sprintf("\"%s\"", hash))
+	c.Status(http.StatusOK)
+}
+
+func s3GetHandler(c *gin.Context) {
+	hash := c.Query("versionId")
+	data, meta, err := storageBackend.GetBlockWithMetadata(hash)
+	if err != nil {
+		abortWithError(c, http.StatusNotFound, "Object not found")
+		return
+	}
+
+	for k, v := range meta {
+		c.Header("x-amz-meta-"+k, v)
+	}
+	c.Data(http.StatusOK, meta["Content-Type"], data)
+}
+
+func s3HeadHandler(c *gin.Context) {
+	hash := c.Query("versionId")
+	_, meta, err := storageBackend.GetBlockWithMetadata(hash)
+	if err != nil {
+		abortWithError(c, http.StatusNotFound, "Object not found")
+		return
+	}
+
+	c.Header("Content-Length", strconv.Itoa(meta.Size))
+	c.Header("ETag", fmt.Sprintf("\"%s\"", hash))
+	c.Status(http.StatusOK)
+}
+
+func s3DeleteHandler(c *gin.Context) {
+	hash := c.Query("versionId")
+	if err := deleteManager.ScheduleDeletion(hash, 5*time.Minute); err != nil {
+		abortWithError(c, http.StatusConflict, "Deletion already scheduled")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ### Admin API Handlers ###
+func listNodesHandler(c *gin.Context) {
+	nodes := nodeManager.GetNodes()
+	c.JSON(http.StatusOK, gin.H{"nodes": nodes})
+}
+
+func restartNodeHandler(c *gin.Context) {
+	nodeID := c.Query("id")
+	if err := nodeManager.RestartNode(nodeID); err != nil {
+		abortWithError(c, http.StatusNotFound, "Node not found")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func systemStatsHandler(c *gin.Context) {
+	stats := gin.H{
+		"total_objects":   storageBackend.ObjectCount(),
+		"total_size":      storageBackend.TotalSize(),
+		"active_sessions": auth.ActiveSessions(),
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+func healthCheckHandler(c *gin.Context) {
+	status := gin.H{
+		"storage":  storageBackend.HealthCheck(),
+		"database": pgStore.HealthCheck(),
+		"nodes":    nodeManager.NodeCount(),
+	}
+	c.JSON(http.StatusOK, status)
+}
+
+// ### Middleware ###
+func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("Authorization")
-		claims, err := auth.ValidateToken(token, store.PublicKey())
+		claims, err := auth.ValidateToken(token, storageBackend.PublicKey())
 		if err != nil {
-			sendError(c, http.StatusUnauthorized, "Invalid credentials")
+			abortWithError(c, http.StatusUnauthorized, "Invalid credentials")
 			return
 		}
 		c.Set("user_id", claims.UserID)
+		c.Set("user_role", claims.Role)
 		c.Next()
 	}
 }
 
 func adminAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID := c.MustGet("user_id").(string)
-		if !isAdmin(userID) {
-			sendError(c, http.StatusForbidden, "Admin access required")
+		role := c.MustGet("user_role").(string)
+		if role != "admin" {
+			abortWithError(c, http.StatusForbidden, "Admin access required")
 			return
 		}
 		c.Next()
 	}
 }
 
-// Вспомогательные функции
-func getPostgresURL() string {
-	if url := os.Getenv("POSTGRES_URL"); url != "" {
-		return url
+// ### Helpers ###
+func getStoragePath() string {
+	if path := os.Getenv("STORAGE_PATH"); path != "" {
+		return path
 	}
-	return "postgres://user:pass@localhost:5432/secure-dag?sslmode=disable"
+	return "./data"
+}
+
+func getPostgresURL() string {
+	return os.Getenv("POSTGRES_URL")
 }
 
 func getPort() string {
@@ -197,53 +298,35 @@ func getPort() string {
 	return "8080"
 }
 
-func isAdmin(userID string) bool {
-	var role string
-	err := pgStore.db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&role)
-	return err == nil && role == "admin"
+func abortWithError(c *gin.Context, code int, message string) {
+	c.AbortWithStatusJSON(code, gin.H{
+		"error":   http.StatusText(code),
+		"message": message,
+	})
 }
 
-func sendError(c *gin.Context, code int, message string) {
-	c.AbortWithStatusJSON(code, gin.H{"error": message})
-}
-
-// Административные обработчики
-func listNodesHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"nodes": nodeManager.GetNodes()})
-}
-
-func restartNodeHandler(c *gin.Context) {
-	nodeID := c.Query("id")
-	if err := nodeManager.RestartNode(nodeID); err != nil {
-		sendError(c, http.StatusNotFound, "Node not found")
+// ### Quota Handlers ###
+func getQuotaHandler(c *gin.Context) {
+	userID := c.Param("id")
+	quota, err := storageBackend.GetQuota(userID)
+	if err != nil {
+		abortWithError(c, http.StatusInternalServerError, "Failed to get quota")
 		return
 	}
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, gin.H{"quota": quota})
 }
 
 func updateQuotaHandler(c *gin.Context) {
 	userID := c.Param("id")
 	var req struct{ Quota int64 `json:"quota"` }
-	
 	if err := c.BindJSON(&req); err != nil {
-		sendError(c, http.StatusBadRequest, "Invalid request format")
+		abortWithError(c, http.StatusBadRequest, "Invalid request format")
 		return
 	}
-	
-	if err := quotaManager.SetQuota(userID, req.Quota); err != nil {
-		sendError(c, http.StatusInternalServerError, "Failed to update quota")
-		return
-	}
-	
-	c.Status(http.StatusOK)
-}
 
-func systemStatsHandler(c *gin.Context) {
-	stats := gin.H{
-		"nodes":       nodeManager.GetNodeStats(),
-		"storage":     storage.GetGlobalUsage(),
-		"throughput":  metrics.GetThroughput(),
-		"active_jobs": deleteManager.ActiveOperations(),
+	if err := storageBackend.UpdateQuota(userID, req.Quota); err != nil {
+		abortWithError(c, http.StatusInternalServerError, "Failed to update quota")
+		return
 	}
-	c.JSON(http.StatusOK, stats)
+	c.Status(http.StatusOK)
 }
