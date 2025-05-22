@@ -4,9 +4,8 @@
 `http://<server-address>/s3`
 
 ## Authentication
-Include JWT token in Authorization header:
 ```http
-Authorization: Bearer <your-token>
+Authorization: Bearer <JWT_TOKEN>
 ```
 
 ## Bucket Operations
@@ -16,9 +15,15 @@ Authorization: Bearer <your-token>
 PUT /{bucket}
 ```
 
-**Response**
-- 200 OK: Bucket created
-- 409 Conflict: Bucket already exists
+### Delete Bucket
+```http
+DELETE /{bucket}
+```
+
+### List Buckets
+```http
+GET /
+```
 
 ## Object Operations
 
@@ -26,54 +31,52 @@ PUT /{bucket}
 ```http
 PUT /{bucket}/{key}
 ```
-
-**Headers**
-- `Content-Type`: MIME type of object
+**Headers:**
+- `Content-Type`: MIME type
 - `x-amz-meta-*`: Custom metadata
 
-**Example**
-```bash
-curl -X PUT -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: text/plain" \
-  -H "x-amz-meta-author: john" \
-  -T file.txt \
-  http://localhost:8080/s3/my-bucket/docs/file.txt
+**Success Response:**
+```xml
+<PutObjectResult>
+  <ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag>
+</PutObjectResult>
 ```
-
-**Response**
-- 200 OK: 
-  ```xml
-  <PutObjectResult>
-    <ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag>
-  </PutObjectResult>
-  ```
 
 ### Get Object
 ```http
-GET /{bucket}/{key}
+GET /{bucket}/{key}?versionId=<VERSION_ID>
 ```
-
-**Query Parameters**
-- `versionId`: Object version ID (required)
-
-**Example**
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-  "http://localhost:8080/s3/my-bucket/docs/file.txt?versionId=abc123"
-```
-
-**Response**
-- 200 OK: Object content
-- 404 Not Found: Object not found
 
 ### Delete Object
 ```http
-DELETE /{bucket}/{key}
+DELETE /{bucket}/{key}?versionId=<VERSION_ID>
 ```
 
-**Response**
-- 204 No Content: Success
-- 404 Not Found: Object not found
+## Versioning
+
+### Enable Versioning
+```http
+PUT /{bucket}?versioning
+```
+
+### List Object Versions
+```http
+GET /{bucket}/{key}?versions
+```
+
+**Example Response:**
+```xml
+<ListVersionsResult>
+  <Version>
+    <Key>report.pdf</Key>
+    <VersionId>ABC123</VersionId>
+    <IsLatest>true</IsLatest>
+    <LastModified>2023-10-05T12:00:00Z</LastModified>
+    <ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag>
+    <Size>2048</Size>
+  </Version>
+</ListVersionsResult>
+```
 
 ## Multipart Upload
 
@@ -82,64 +85,46 @@ DELETE /{bucket}/{key}
 POST /{bucket}/{key}?uploads
 ```
 
-**Response**
-```xml
-<InitiateMultipartUploadResult>
-  <Bucket>my-bucket</Bucket>
-  <Key>large-file.zip</Key>
-  <UploadId>ABC123</UploadId>
-</InitiateMultipartUploadResult>
-```
-
 ### Upload Part
 ```http
-PUT /{bucket}/{key}?partNumber=1&uploadId=ABC123
-```
-
-**Response**
-```xml
-<Part>
-  <PartNumber>1</PartNumber>
-  <ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag>
-</Part>
+PUT /{bucket}/{key}?partNumber=1&uploadId=UPLOAD_ID
 ```
 
 ### Complete Upload
 ```http
-POST /{bucket}/{key}?uploadId=ABC123
+POST /{bucket}/{key}?uploadId=UPLOAD_ID
 ```
 
-**Request Body**
-```xml
-<CompleteMultipartUpload>
-  <Part>
-    <PartNumber>1</PartNumber>
-    <ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag>
-  </Part>
-</CompleteMultipartUpload>
+## Lifecycle Management
+
+### Add Lifecycle Rule
+```http
+PUT /admin/lifecycle
+{
+  "id": "delete-old-files",
+  "actions": ["Delete"],
+  "conditions": {"ageDays": 30}
+}
 ```
 
-**Response**
-```xml
-<CompleteMultipartUploadResult>
-  <Location>http://localhost:8080/s3/my-bucket/large-file.zip</Location>
-  <ETag>"final-etag"</ETag>
-</CompleteMultipartUploadResult>
+### Execute Rules
+```http
+POST /admin/lifecycle/execute?bucket=<BUCKET>
 ```
 
 ## Error Responses
-
-**Format**
 ```xml
 <Error>
   <Code>NoSuchKey</Code>
   <Message>The specified key does not exist</Message>
   <Resource>/my-bucket/missing-file.txt</Resource>
-  <RequestId>ABC123</RequestId>
+  <RequestId>REQ123</RequestId>
 </Error>
 ```
 
-**Common Errors**
-- 403 Forbidden: Invalid credentials
-- 404 Not Found: Bucket/Object not found
-- 500 Internal Server Error: Server error
+| Code            | Description                     |
+|-----------------|---------------------------------|
+| AccessDenied    | Permission denied               |
+| NoSuchBucket    | Bucket does not exist           |
+| NoSuchKey       | Object not found                |
+| InvalidArgument | Invalid request parameters      |
