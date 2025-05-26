@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    command: ./bin/api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      - POSTGRES_URL=postgres://user:password@postgres:5432/securedag?sslmode=disable
+      - STORAGE_PATH=/data
+    volumes:
+      - data:/data
+
+  node:
+    build: .
+    command: ./bin/node
+    depends_on:
+      - api
+    environment:
+      - API_URL=http://api:8080
+
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=securedag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  data:
+  pgdata:
