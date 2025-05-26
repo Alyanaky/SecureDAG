@@ -1,21 +1,30 @@
 package storage
 
 type QuotaManager struct {
-	limits map[string]int64 // userID -> bytes
-	usage  map[string]int64
+	store *BadgerStore
 }
 
-func NewQuotaManager() *QuotaManager {
-	return &QuotaManager{
-		limits: make(map[string]int64),
-		usage:  make(map[string]int64),
+func NewQuotaManager(store *BadgerStore) *QuotaManager {
+	return &QuotaManager{store: store}
+}
+
+func (q *QuotaManager) CheckQuota(userID string, size int64) (bool, error) {
+	limit, err := q.store.GetQuota(userID)
+	if err != nil {
+		return false, err
 	}
+	usage, err := q.store.GetUsage(userID)
+	if err != nil {
+		return false, err
+	}
+	return usage + size <= limit, nil
 }
 
-func (q *QuotaManager) CheckQuota(userID string, size int64) bool {
-	return q.usage[userID]+size <= q.limits[userID]
-}
-
-func (q *QuotaManager) UpdateUsage(userID string, delta int64) {
-	q.usage[userID] += delta
+func (q *QuotaManager) UpdateUsage(userID string, delta int64) error {
+	usage, err := q.store.GetUsage(userID)
+	if err != nil {
+		return err
+	}
+	usage += delta
+	return q.store.SetUsage(userID, usage)
 }
