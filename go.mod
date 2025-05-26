@@ -1,6 +1,6 @@
 module github.com/Alyanaky/SecureDAG
 
-go 1.21
+go 1.18
 
 require (
 	github.com/dgraph-io/badger/v4 v4.2.0
