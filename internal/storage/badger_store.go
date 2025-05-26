@@ -39,14 +39,14 @@ type BlockMetadata struct {
 
 type BadgerStore struct {
 	db          *badger.DB
-	publicKey   *rsa.PublicKey
-	privateKey  *rsa.PrivateKey
+	keyManager  *crypto.KeyManager
+	dht         *dht.IpfsDHT
 	mu          sync.RWMutex
 	deletionMap map[string]chan struct{}
 	quotaCache  map[string]int64
 }
 
-func NewBadgerStore(path string) (*BadgerStore, error) {
+func NewBadgerStore(path string, dht *dht.IpfsDHT) (*BadgerStore, error) {
 	opts := badger.DefaultOptions(path)
 	opts.Logger = nil
 	opts.Compression = options.ZSTD
@@ -58,21 +58,19 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		return nil, err
 	}
 
-	privKey, pubKey, err := crypto.GenerateRSAKeys()
-	if err != nil {
-		return nil, err
-	}
-
 	store := &BadgerStore{
 		db:          db,
-		publicKey:   pubKey,
-		privateKey:  privKey,
+		keyManager:  crypto.KeyManager(),
+		dht:         dht,
 		deletionMap: make(map[string]chan struct{}),
 		quotaCache:  make(map[string]int64),
 	}
 
 	go store.autoHeal()
-	go crypto.KeyManager().StartRotation(context.Background())
+	reencryptFunc := func(oldPriv *rsa.PrivateKey, newPub *rsa.PublicKey) error {
+		return store.reencryptAESKeys(oldPriv, newPub)
+	}
+	go store.keyManager.StartRotation(context.Background(), reencryptFunc)
 	return store, nil
 }
 
@@ -97,7 +95,7 @@ func (s *BadgerStore) PutBlock(data []byte, meta map[string]string) (string, err
 		return "", err
 	}
 
-	encryptedKey, err := crypto.EncryptAESKey(s.publicKey, aesKey)
+	encryptedKey, err := crypto.EncryptAESKey(s.keyManager.GetPublicKey(), aesKey)
 	if err != nil {
 		return "", err
 	}
@@ -112,6 +110,15 @@ func (s *BadgerStore) PutBlock(data []byte, meta map[string]string) (string, err
 		}
 		return s.updateMetadata(txn, hash, meta, len(data))
 	})
+
+	if err != nil {
+		return "", err
+	}
+
+	ctx := context.Background()
+	if err := s.dht.Provide(ctx, hash); err != nil {
+		// log error
+	}
 
 	return hash, err
 }
@@ -149,7 +156,7 @@ func (s *BadgerStore) GetBlock(hash string) ([]byte, error) {
 		return nil, err
 	}
 
-	aesKey, err := crypto.DecryptAESKey(s.privateKey, encryptedKey)
+	aesKey, err := crypto.DecryptAESKey(s.keyManager.GetPrivateKey(), encryptedKey)
 	if err != nil {
 		return nil, err
 	}
@@ -226,14 +233,21 @@ func (s *BadgerStore) autoHeal() {
 				item := it.Item()
 				key := item.Key()
 				if bytes.HasPrefix(key, []byte(MetadataPrefix)) {
-					var meta BlockMetadata
-					item.Value(func(val []byte) error {
-						json.Unmarshal(val, &meta)
-						if meta.References < MinReplicas {
-							go s.healBlock(string(key[len(MetadataPrefix):]))
+					hash := string(key[len(MetadataPrefix):])
+					providers, err := s.dht.FindProvidersAsync(context.Background(), hash, 0)
+					if err != nil {
+						continue
+					}
+					var providerList []string
+					for p := range providers {
+						providerList = append(providerList, p.ID.String())
+						if len(providerList) >= MinReplicas {
+							break
 						}
-						return nil
-					})
+					}
+					if len(providerList) < MinReplicas {
+						go s.healBlock(hash, MinReplicas-len(providerList), providerList)
+					}
 				}
 			}
 			return nil
@@ -241,14 +255,12 @@ func (s *BadgerStore) autoHeal() {
 	}
 }
 
-func (s *BadgerStore) healBlock(hash string) {
+func (s *BadgerStore) healBlock(hash string, needed int, excluded []string) {
 	data, err := s.GetBlock(hash)
 	if err != nil {
 		return
 	}
-
-	meta, _ := s.GetBlockMetadata(hash)
-	nodes := p2p.SelectNodesForReplication(MinReplicas - meta.References)
+	nodes := p2p.SelectNodesForReplication(needed, excluded)
 	p2p.ReplicateToNodes(hash, data, nodes)
 }
 
@@ -293,4 +305,63 @@ func (s *BadgerStore) GetQuota(userID string) (int64, error) {
 		})
 	})
 	return quota, err
+}
+
+func (s *BadgerStore) GetUsage(userID string) (int64, error) {
+	var usage int64
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("usage_" + userID))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil // usage is 0
+			}
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			_, err := fmt.Sscanf(string(val), "%d", &usage)
+			return err
+		})
+	})
+	return usage, err
+}
+
+func (s *BadgerStore) SetUsage(userID string, usage int64) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("usage_" + userID), []byte(fmt.Sprintf("%d", usage)))
+	})
+}
+
+func (s *BadgerStore) reencryptAESKeys(oldPriv *rsa.PrivateKey, newPub *rsa.PublicKey) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte(KeyPrefix)
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			var encryptedKey []byte
+			err := item.Value(func(val []byte) error {
+				encryptedKey = append([]byte{}, val...)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			aesKey, err := crypto.DecryptAESKey(oldPriv, encryptedKey)
+			if err != nil {
+				return err
+			}
+			newEncryptedKey, err := crypto.EncryptAESKey(newPub, aesKey)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(key, newEncryptedKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
