@@ -1,36 +1,43 @@
 package auth
 
 import (
-	"crypto/rsa"
-	"time"
+    "crypto/rand"
+    "crypto/rsa"
+    "time"
 
-	"github.com/golang-jwt/jwt/v5"
+    "github.com/golang-jwt/jwt/v5"
 )
 
-type Claims struct {
-	UserID string `json:"uid"`
-	jwt.RegisteredClaims
+var (
+    privateKey *rsa.PrivateKey
+    publicKey  *rsa.PublicKey
+)
+
+// SetTempKeyForTesting generates a temporary RSA key pair for testing purposes.
+func SetTempKeyForTesting(expiration time.Time) {
+    var err error
+    privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        panic(err)
+    }
+    publicKey = &privateKey.PublicKey
 }
 
-func GenerateToken(userID string, privKey *rsa.PrivateKey) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		},
-	}
-	
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	return token.SignedString(privKey)
-}
+func GenerateToken(username string, customClaims map[string]interface{}) (string, error) {
+    if privateKey == nil {
+        return "", jwt.ErrInvalidKey
+    }
 
-func ValidateToken(tokenStr string, pubKey *rsa.PublicKey) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-		return pubKey, nil
-	})
-	
-	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		return claims, nil
-	}
-	return nil, err
+    claims := jwt.MapClaims{
+        "sub": username,
+        "iat": jwt.NewNumericDate(time.Now()),
+        "exp": jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+    }
+
+    for k, v := range customClaims {
+        claims[k] = v
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+    return token.SignedString(privateKey)
 }
