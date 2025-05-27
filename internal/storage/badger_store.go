@@ -2,12 +2,14 @@ package storage
 
 import (
     "context"
+    "crypto/rand"
     "log"
     "time"
 
     "github.com/Alyanaky/SecureDAG/internal/crypto"
     "github.com/Alyanaky/SecureDAG/internal/p2p"
     "github.com/dgraph-io/badger/v4"
+    "github.com/dgraph-io/badger/v4/options"
     "github.com/ipfs/go-cid"
     "github.com/multiformats/go-multihash"
 )
@@ -26,8 +28,8 @@ type BadgerStore struct {
 
 func NewBadgerStore(dir string) (*BadgerStore, error) {
     opts := badger.DefaultOptions(dir)
-    opts = opts.WithSyncWrites(true)
-    opts = opts.WithCompression(options.ZSTD)
+    opts.SyncWrites = true
+    opts.Compression = options.ZSTD
 
     db, err := badger.Open(opts)
     if err != nil {
@@ -122,7 +124,6 @@ func (s *BadgerStore) DeleteObject(bucket, key string) error {
 }
 
 func (s *BadgerStore) healBlock(ctx context.Context) error {
-    // Заглушка для метода self-healing
     log.Println("Running self-healing process")
     return nil
 }
