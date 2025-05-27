@@ -2,60 +2,48 @@ package storage
 
 import (
     "context"
-    "fmt"
-    "sync"
     "time"
+
+    "github.com/dgraph-io/badger/v4"
 )
 
-type DeletionManager struct {
-    mu      sync.Mutex
-    pending map[string]chan bool
-}
-
-func NewDeletionManager() *DeletionManager {
-    return &DeletionManager{
-        pending: make(map[string]chan bool),
-    }
-}
-
-func (dm *DeletionManager) ScheduleDeletion(hash string, timeout time.Duration) error {
-    dm.mu.Lock()
-    defer dm.mu.Unlock()
-    
-    if _, exists := dm.pending[hash]; exists {
-        return fmt.Errorf("deletion already scheduled")
-    }
-    
-    done := make(chan bool, 1)
-    dm.pending[hash] = done
-    
-    go func() {
-        select {
-        case <-time.After(timeout):
-            dm.forceDelete(hash)
-        case <-done:
-            return
+func (s *BadgerStore) SoftDeleteObject(ctx context.Context, bucket, key string) error {
+    return s.db.Update(func(txn *badger.Txn) error {
+        objKey := []byte(bucket + "/" + key)
+        deletedKey := []byte(bucket + "/" + key + "/deleted")
+        item, err := txn.Get(objKey)
+        if err != nil {
+            return err
         }
-    }()
-    
-    return nil
+        data, err := item.ValueCopy(nil)
+        if err != nil {
+            return err
+        }
+        if err := txn.Set(deletedKey, data); err != nil {
+            return err
+        }
+        return txn.Delete(objKey)
+    })
 }
 
-func (dm *DeletionManager) ConfirmDeletion(hash string) {
-    dm.mu.Lock()
-    defer dm.mu.Unlock()
-    
-    if done, exists := dm.pending[hash]; exists {
-        close(done)
-        delete(dm.pending, hash)
-    }
-}
+func (s *BadgerStore) PurgeDeletedObjects(ctx context.Context, retention time.Duration) error {
+    cutoff := time.Now().Add(-retention)
+    return s.db.Update(func(txn *badger.Txn) error {
+        opts := badger.DefaultIteratorOptions
+        opts.PrefetchValues = false
+        it := txn.NewIterator(opts)
+        defer it.Close()
 
-func (dm *DeletionManager) forceDelete(hash string) {
-    dm.mu.Lock()
-    defer dm.mu.Unlock()
-    
-    // Логика удаления данных из хранилища
-    store.DeleteBlock(hash)
-    delete(dm.pending, hash)
+        prefix := []byte("/deleted")
+        for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+            item := it.Item()
+            key := item.KeyCopy(nil)
+            if item.ExpiresAt() != 0 && time.Unix(int64(item.ExpiresAt()), 0).Before(cutoff) {
+                if err := txn.Delete(key); err != nil {
+                    return err
+                }
+            }
+        }
+        return nil
+    })
 }
