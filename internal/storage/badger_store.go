@@ -10,8 +10,6 @@ import (
     "github.com/Alyanaky/SecureDAG/internal/p2p"
     "github.com/dgraph-io/badger/v4"
     "github.com/dgraph-io/badger/v4/options"
-    "github.com/ipfs/go-cid"
-    "github.com/multiformats/go-multihash"
 )
 
 const (
