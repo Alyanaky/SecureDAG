@@ -3,8 +3,6 @@ package storage
 import (
     "context"
     "time"
-
-    "github.com/dgraph-io/badger/v4"
 )
 
 func (s *BadgerStore) SelfHeal(ctx context.Context) error {
