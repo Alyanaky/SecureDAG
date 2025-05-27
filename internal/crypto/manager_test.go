@@ -1,7 +1,6 @@
 package crypto
 
 import (
-    "crypto/aes"
     "crypto/rand"
     "testing"
 
@@ -12,7 +11,7 @@ import (
 func TestKeyManager_EncryptData(t *testing.T) {
     km := NewKeyManager()
     aesKey := make([]byte, 32)
-    _, err := rand.ReadFull(rand.Reader, aesKey)
+    _, err := rand.Read(aesKey)
     require.NoError(t, err)
 
     originalData := []byte("sensitive data")
