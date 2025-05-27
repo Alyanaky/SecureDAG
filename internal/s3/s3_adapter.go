@@ -1,90 +1,65 @@
 package s3
 
 import (
-	"errors"
-	"strings"
+    "context"
+    "io"
 
-	"github.com/Alyanaky/SecureDAG/internal/storage"
+    "github.com/Alyanaky/SecureDAG/internal/storage"
+    "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type S3Adapter struct {
-	store         *storage.PostgresStore
-	storageBackend *storage.BadgerStore
+    storageBackend *storage.BadgerStore
+    store         *storage.PostgresStore
 }
 
-func NewS3Adapter(store *storage.PostgresStore, backend *storage.BadgerStore) *S3Adapter {
-	return &S3Adapter{
-		store:         store,
-		storageBackend: backend,
-	}
+func NewS3Adapter(storageBackend *storage.BadgerStore, store *storage.PostgresStore) *S3Adapter {
+    return &S3Adapter{
+        storageBackend: storageBackend,
+        store:         store,
+    }
 }
 
-func (a *S3Adapter) PutObject(bucket, key string, data []byte, metadata map[string]string) error {
-	hash, err := a.storageBackend.PutBlockWithMetadata(data, metadata)
-	if err != nil {
-		return err
-	}
-	obj := &storage.Object{
-		Bucket:   bucket,
-		Key:      key,
-		Hash:     hash,
-		Metadata: metadata,
-	}
-	return a.store.PutObject(obj)
+func (a *S3Adapter) PutObject(ctx context.Context, input *s3.PutObjectInput) (*s3.PutObjectOutput, error) {
+    data, err := io.ReadAll(input.Body)
+    if err != nil {
+        return nil, err
+    }
+    err = a.storageBackend.PutObject(*input.Bucket, *input.Key, data)
+    if err != nil {
+        return nil, err
+    }
+    return &s3.PutObjectOutput{}, nil
 }
 
-func (a *S3Adapter) GetObject(bucket, key, versionID string) (*storage.Object, error) {
-	return a.store.GetObject(bucket, key, versionID)
+func (a *S3Adapter) GetObject(ctx context.Context, input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
+    data, err := a.storageBackend.GetObject(*input.Bucket, *input.Key)
+    if err != nil {
+        return nil, err
+    }
+    return &s3.GetObjectOutput{
+        Body: io.NopCloser(bytes.NewReader(data)),
+    }, nil
 }
 
-func (a *S3Adapter) DeleteObject(bucket, key, versionID string) error {
-	return a.store.DeleteObject(bucket, key, versionID)
+func (a *S3Adapter) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
+    err := a.storageBackend.DeleteObject(*input.Bucket, *input.Key)
+    if err != nil {
+        return nil, err
+    }
+    return &s3.DeleteObjectOutput{}, nil
 }
 
-func (a *S3Adapter) CreateMultipartUpload(bucket, key string) (string, error) {
-	return a.store.CreateMultipartUpload(bucket, key)
+func (a *S3Adapter) CreateMultipartUpload(ctx context.Context, input *s3.CreateMultipartUploadInput) (*s3.CreateMultipartUploadOutput, error) {
+    // Заглушка для multipart upload
+    return &s3.CreateMultipartUploadOutput{
+        UploadId: aws.String("mock-upload-id"),
+    }, nil
 }
 
-func (a *S3Adapter) UploadPart(bucket, key, uploadID string, partNumber int, data []byte) (string, error) {
-	hash, err := a.storageBackend.PutBlock(data)
-	if err != nil {
-		return "", err
-	}
-	return a.store.UploadPart(bucket, key, uploadID, partNumber, hash)
-}
-
-func (a *S3Adapter) CompleteMultipartUpload(bucket, key, uploadID string, parts []storage.Part) error {
-	return a.store.CompleteMultipartUpload(bucket, key, uploadID, parts)
-}
-
-func (a *S3Adapter) AbortMultipartUpload(bucket, key, uploadID string) error {
-	return a.store.AbortMultipartUpload(uploadID)
-}
-
-func (a *S3Adapter) CopyObject(destBucket, destKey, source string) error {
-	parts := strings.Split(source, "/")
-	if len(parts) < 2 || parts[0] != "" {
-		return errors.New("invalid copy source")
-	}
-	sourceBucket := parts[1]
-	sourceKey := strings.Join(parts[2:], "/")
-	sourceObj, err := a.store.GetObject(sourceBucket, sourceKey, "")
-	if err != nil {
-		return err
-	}
-	data, err := a.storageBackend.GetBlock(sourceObj.Hash)
-	if err != nil {
-		return err
-	}
-	hash, err := a.storageBackend.PutBlockWithMetadata(data, sourceObj.Metadata)
-	if err != nil {
-		return err
-	}
-	destObj := &storage.Object{
-		Bucket:   destBucket,
-		Key:      destKey,
-		Hash:     hash,
-		Metadata: sourceObj.Metadata,
-	}
-	return a.store.PutObject(destObj)
+func (a *S3Adapter) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3.UploadPartOutput, error) {
+    // Заглушка для upload part
+    return &s3.UploadPartOutput{
+        ETag: aws.String("mock-etag"),
+    }, nil
 }
