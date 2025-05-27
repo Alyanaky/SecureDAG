@@ -1,43 +1,33 @@
 package dag
 
 import (
-	"crypto/sha256"
-	"errors"
+    "bytes"
+    "crypto/sha256"
 )
 
-type Node struct {
-	Hash  []byte
-	Links []*Node
+type MerkleNode struct {
+    Hash  []byte
+    Left  *MerkleNode
+    Right *MerkleNode
 }
 
-func NewMerkleNode(links []*Node, data []byte) *Node {
-	if len(links) == 0 {
-		return &Node{Hash: hashData(data)}
-	}
-	return &Node{Hash: hashLinks(links), Links: links}
-}
-
-func hashData(data []byte) []byte {
-	h := sha256.Sum256(data)
-	return h[:]
-}
-
-func hashLinks(links []*Node) []byte {
-	h := sha256.New()
-	for _, link := range links {
-		h.Write(link.Hash)
-	}
-	return h.Sum(nil)
-}
-
-func Verify(root *Node) error {
-	for _, link := range root.Links {
-		if !bytes.Equal(link.Hash, hashLinks(link.Links)) {
-			return errors.New("invalid merkle structure")
-		}
-		if err := Verify(link); err != nil {
-			return err
-		}
-	}
-	return nil
+func NewMerkleNode(data []byte, left, right *MerkleNode) *MerkleNode {
+    var hash [32]byte
+    if left == nil && right == nil {
+        hash = sha256.Sum256(data)
+    } else {
+        var buf bytes.Buffer
+        if left != nil {
+            buf.Write(left.Hash)
+        }
+        if right != nil {
+            buf.Write(right.Hash)
+        }
+        hash = sha256.Sum256(buf.Bytes())
+    }
+    return &MerkleNode{
+        Hash:  hash[:],
+        Left:  left,
+        Right: right,
+    }
 }
