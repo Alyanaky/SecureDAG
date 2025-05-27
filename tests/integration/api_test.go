@@ -2,7 +2,6 @@ package integration
 
 import (
     "bytes"
-    "context"
     "net/http"
     "net/http/httptest"
     "os"
@@ -32,7 +31,6 @@ func setupTestServer(t *testing.T) (*gin.Engine, *storage.BadgerStore, *storage.
 
     r := gin.Default()
     r.PUT("/s3/:bucket", func(c *gin.Context) {
-        bucket := c.Param("bucket")
         c.Status(http.StatusOK)
     })
     r.PUT("/s3/:bucket/:key", func(c *gin.Context) {
