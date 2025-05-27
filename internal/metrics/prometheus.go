@@ -1,31 +1,28 @@
 package metrics
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+    "net/http"
+    "github.com/dgraph-io/badger/v4"
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var (
-	RequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests",
-		},
-		[]string{"method", "path", "status"},
-	)
-
-	StorageUsage = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "storage_usage_bytes",
-			Help: "Total storage usage in bytes",
-		},
-	)
-)
-
-func Init() {
-	prometheus.MustRegister(RequestsTotal, StorageUsage)
+func RegisterMetrics() {
+    prometheus.MustRegister(prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Name: "securedag_operations_total",
+            Help: "Total number of operations performed",
+        },
+    ))
+    prometheus.MustRegister(prometheus.NewGauge(
+        prometheus.GaugeOpts{
+            Name: "securedag_active_nodes",
+            Help: "Number of active nodes in the network",
+        },
+    ))
 }
 
-func Handler() http.Handler {
-	return promhttp.Handler()
+func ExposeMetrics() {
+    http.Handle("/metrics", promhttp.Handler())
+    http.ListenAndServe(":9090", nil)
 }
