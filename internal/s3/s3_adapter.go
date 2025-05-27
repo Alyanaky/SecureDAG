@@ -1,11 +1,13 @@
 package s3
 
 import (
+    "bytes"
     "context"
     "io"
 
     "github.com/Alyanaky/SecureDAG/internal/storage"
     "github.com/aws/aws-sdk-go-v2/service/s3"
+    "github.com/aws/aws-sdk-go-v2/aws"
 )
 
 type S3Adapter struct {
@@ -51,14 +53,12 @@ func (a *S3Adapter) DeleteObject(ctx context.Context, input *s3.DeleteObjectInpu
 }
 
 func (a *S3Adapter) CreateMultipartUpload(ctx context.Context, input *s3.CreateMultipartUploadInput) (*s3.CreateMultipartUploadOutput, error) {
-    // Заглушка для multipart upload
     return &s3.CreateMultipartUploadOutput{
         UploadId: aws.String("mock-upload-id"),
     }, nil
 }
 
 func (a *S3Adapter) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3.UploadPartOutput, error) {
-    // Заглушка для upload part
     return &s3.UploadPartOutput{
         ETag: aws.String("mock-etag"),
     }, nil
