@@ -8,7 +8,7 @@ import (
 
     "github.com/Alyanaky/SecureDAG/internal/s3"
     "github.com/Alyanaky/SecureDAG/internal/storage"
-    "github.com/aws/aws-sdk-go-v2/service/s3"
+    aws_s3 "github.com/aws/aws-sdk-go-v2/service/s3"
     "github.com/gin-gonic/gin"
 )
 
@@ -50,7 +50,7 @@ func main() {
             return
         }
 
-        input := &s3.PutObjectInput{
+        input := &aws_s3.PutObjectInput{
             Bucket: &bucket,
             Key:    &key,
             Body:   bytes.NewReader(data),
@@ -65,7 +65,7 @@ func main() {
     r.GET("/s3/:bucket/:key", func(c *gin.Context) {
         bucket := c.Param("bucket")
         key := c.Param("key")
-        input := &s3.GetObjectInput{
+        input := &aws_s3.GetObjectInput{
             Bucket: &bucket,
             Key:    &key,
         }
@@ -85,7 +85,7 @@ func main() {
     r.DELETE("/s3/:bucket/:key", func(c *gin.Context) {
         bucket := c.Param("bucket")
         key := c.Param("key")
-        input := &s3.DeleteObjectInput{
+        input := &aws_s3.DeleteObjectInput{
             Bucket: &bucket,
             Key:    &key,
         }
