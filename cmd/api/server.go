@@ -1,11 +1,14 @@
 package main
 
 import (
+    "bytes"
     "context"
+    "io"
     "log"
 
     "github.com/Alyanaky/SecureDAG/internal/s3"
     "github.com/Alyanaky/SecureDAG/internal/storage"
+    "github.com/aws/aws-sdk-go-v2/service/s3"
     "github.com/gin-gonic/gin"
 )
 
