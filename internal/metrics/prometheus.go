@@ -2,7 +2,6 @@ package metrics
 
 import (
     "net/http"
-    "github.com/dgraph-io/badger/v4"
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promhttp"
 )
