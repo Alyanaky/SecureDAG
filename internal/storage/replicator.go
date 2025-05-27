@@ -1,64 +1,45 @@
 package storage
 
 import (
-	"context"
-	"time"
+    "context"
+    "log"
 
-	"github.com/Alyanaky/SecureDAG/internal/p2p"
-	"github.com/libp2p/go-libp2p-kad-dht"
+    "github.com/Alyanaky/SecureDAG/internal/p2p"
+    "github.com/dgraph-io/badger/v4"
 )
 
 type Replicator struct {
-	store    *BadgerStore
-	dht      *dht.IpfsDHT
-	interval time.Duration
+    store *BadgerStore
+    dht   *p2p.DHTOperations
 }
 
-func NewReplicator(store *BadgerStore, dht *dht.IpfsDHT, interval time.Duration) *Replicator {
-	return &Replicator{
-		store:    store,
-		dht:      dht,
-		interval: interval,
-	}
+func NewReplicator(store *BadgerStore, dht *p2p.DHTOperations) *Replicator {
+    return &Replicator{store: store, dht: dht}
 }
 
-func (r *Replicator) Start(ctx context.Context) {
-	ticker := time.NewTicker(r.interval)
-	for {
-		select {
-		case <-ticker.C:
-			r.checkAndRepair()
-		case <-ctx.Done():
-			return
-		}
-	}
+func (r *Replicator) Replicate(ctx context.Context, bucket, key string) error {
+    data, err := r.store.GetObject(bucket, key)
+    if err != nil {
+        return err
+    }
+
+    return r.dht.ReplicateData(ctx, bucket+"/"+key, data)
 }
 
-func (r *Replicator) checkAndRepair() {
-	r.store.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		it := txn.NewIterator(opts)
-		defer it.Close()
+func (r *Replicator) EnsureReplicas(ctx context.Context) error {
+    return r.store.db.View(func(txn *badger.Txn) error {
+        opts := badger.DefaultIteratorOptions
+        opts.PrefetchValues = true
+        it := txn.NewIterator(opts)
+        defer it.Close()
 
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			key := item.Key()
-			if bytes.HasPrefix(key, []byte("meta_")) {
-				var meta BlockMetadata
-				item.Value(func(val []byte) error {
-					json.Unmarshal(val, &meta)
-					if meta.References < 3 {
-						go r.replicateBlock(key[5:])
-					}
-					return nil
-				})
-			}
-		}
-		return nil
-	})
-}
-
-func (r *Replicator) replicateBlock(hash []byte) {
-	data, _ := r.store.GetBlock(string(hash))
-	p2p.ReplicateBlock(context.Background(), r.dht, string(hash), data, 3)
+        for it.Rewind(); it.Valid(); it.Next() {
+            item := it.Item()
+            key := item.KeyCopy(nil)
+            if err := r.dht.ReplicateData(ctx, string(key), item.ValueCopy(nil)); err != nil {
+                log.Printf("Failed to replicate key %s: %v", key, err)
+            }
+        }
+        return nil
+    })
 }
