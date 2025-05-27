@@ -6,6 +6,7 @@ import (
     "net/http/httptest"
     "os"
     "testing"
+    "time"
 
     "github.com/Alyanaky/SecureDAG/internal/auth"
     "github.com/Alyanaky/SecureDAG/internal/storage"
@@ -63,6 +64,9 @@ func setupTestServer(t *testing.T) (*gin.Engine, *storage.BadgerStore, *storage.
 
 func TestS3CreateBucket(t *testing.T) {
     r, _, _ := setupTestServer(t)
+
+    // Используем временный ключ для теста, чтобы избежать паники
+    auth.SetTempKeyForTesting(time.Now().Add(time.Hour))
     token, err := auth.GenerateToken("testuser", nil)
     require.NoError(t, err)
 
@@ -76,6 +80,8 @@ func TestS3CreateBucket(t *testing.T) {
 
 func TestS3PutAndGetObject(t *testing.T) {
     r, _, _ := setupTestServer(t)
+
+    auth.SetTempKeyForTesting(time.Now().Add(time.Hour))
     token, err := auth.GenerateToken("testuser", nil)
     require.NoError(t, err)
 
