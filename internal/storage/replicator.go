@@ -36,7 +36,12 @@ func (r *Replicator) EnsureReplicas(ctx context.Context) error {
         for it.Rewind(); it.Valid(); it.Next() {
             item := it.Item()
             key := item.KeyCopy(nil)
-            if err := r.dht.ReplicateData(ctx, string(key), item.ValueCopy(nil)); err != nil {
+            val, err := item.ValueCopy(nil)
+            if err != nil {
+                log.Printf("Failed to copy value for key %s: %v", key, err)
+                continue
+            }
+            if err := r.dht.ReplicateData(ctx, string(key), val); err != nil {
                 log.Printf("Failed to replicate key %s: %v", key, err)
             }
         }
