@@ -66,26 +66,3 @@ bash
 Generating JWT Tokens
 
 Tokens are generated using RSA-based JWTs. For testing, a temporary key is set in integration tests. In production, ensure proper key management via internal/auth/jwt.go.
-Running Tests
-
-Run integration tests to verify S3 operations:
-bash
-go test ./tests/integration -v
-Project Structure
-text
-SecureDAG/
-├── cmd/
-│   ├── api/          # API server implementation
-│   └── node/         # Node daemon for self-healing
-├── internal/
-│   ├── auth/         # JWT-based authentication
-│   ├── crypto/       # Cryptographic key management and encryption
-│   ├── dag/          # DAG-related operations
-│   ├── lifecycle/    # Object lifecycle management
-│   ├── p2p/          # P2P networking and DHT
-│   ├── s3/           # S3-compatible API adapter
-│   ├── storage/      # Storage backend (BadgerDB, PostgreSQL)
-│   └── sync/         # Gossip-based synchronization
-├── tests/
-│   └── integration/  # Integration tests for S3 API
-└── README.md
