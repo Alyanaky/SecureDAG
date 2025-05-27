@@ -7,12 +7,6 @@ import (
     "time"
 )
 
-type KeyManager struct {
-    privateKey *rsa.PrivateKey
-    publicKey  *rsa.PublicKey
-    mu         sync.Mutex
-}
-
 func RotateKeys(km *KeyManager, interval time.Duration) error {
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
